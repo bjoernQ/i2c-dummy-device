@@ -14,4 +14,6 @@ SDA is on GPIO 1, SCL is on GPIO 2.
 
 Additionally it can simulate clock-stetching by changing `CLOCK_STRETCH_DELAY_US`
 
+If it doesn't work you might need to add external pull-up resistors.
+
 This is really just for testing purposes - it might crash or act weird in many ways.
