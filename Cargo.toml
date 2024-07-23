@@ -6,11 +6,6 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-esp32c3-hal = "0.5.0"
-esp-backtrace = { version = "0.4.0", features = ["esp32c3", "panic-handler", "print-uart"] }
-esp-println = { version = "0.3.1", features = ["esp32c3"] }
-riscv-rt = { version = "0.11", optional = true }
-
-[features]
-default = ["rt"]
-rt = ["riscv-rt"]
+esp-hal = { version = "0.19.0", features =["esp32c3"] }
+esp-backtrace = { version = "0.13.0", features = ["esp32c3", "panic-handler", "println"] }
+esp-println = { version = "0.10.0", features = ["esp32c3"] }

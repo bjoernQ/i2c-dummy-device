@@ -1,13 +1,18 @@
 #![no_std]
 #![no_main]
 
-const VERBOSE: bool = true;
+const VERBOSE: bool = false;
 const CLOCK_STRETCH_DELAY_US: u32 = 0;
 
-use esp32c3_hal::{
-    clock::ClockControl, peripherals::Peripherals, prelude::*, timer::TimerGroup, Delay, Rtc, IO,
-};
 use esp_backtrace as _;
+use esp_hal::{
+    clock::ClockControl,
+    delay::Delay,
+    gpio::{Io, Level, OutputOpenDrain, Pull},
+    peripherals::Peripherals,
+    prelude::*,
+    system::SystemControl,
+};
 use esp_println::println;
 
 #[derive(Debug, PartialEq, PartialOrd, Copy, Clone)]
@@ -29,44 +34,28 @@ enum I2cState {
 macro_rules! do_clock_stretch {
     ($time:ident,$delay:ident,$scl:ident,$block:block) => {
         if $time > 0 {
-            $scl.set_low().ok();
+            $scl.set_low();
             $block
-            $delay.delay_us($time);
-            $scl.set_high().ok();
+            $delay.delay_micros($time);
+            $scl.set_high();
         } else {
             $block
         }
     };
 }
 
-#[riscv_rt::entry]
+#[entry]
 fn main() -> ! {
     let peripherals = Peripherals::take();
-    let system = peripherals.SYSTEM.split();
-    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
-    //let clocks = ClockControl::configure(system.clock_control, esp32c3_hal::clock::CpuClock::Clock160MHz).freeze();
+    let system = SystemControl::new(peripherals.SYSTEM);
+    let clocks = ClockControl::max(system.clock_control).freeze();
 
-    // Disable the RTC and TIMG watchdog timers
-    let mut rtc = Rtc::new(peripherals.RTC_CNTL);
-    let timer_group0 = TimerGroup::new(peripherals.TIMG0, &clocks);
-    let mut wdt0 = timer_group0.wdt;
-    let timer_group1 = TimerGroup::new(peripherals.TIMG1, &clocks);
-    let mut wdt1 = timer_group1.wdt;
+    let io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    rtc.swd.disable();
-    rtc.rwdt.disable();
-    wdt0.disable();
-    wdt1.disable();
+    let mut sda_pin = OutputOpenDrain::new(io.pins.gpio1, Level::High, Pull::Up);
+    let mut scl_pin = OutputOpenDrain::new(io.pins.gpio2, Level::High, Pull::Up);
 
-    let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
-
-    let mut sda_pin = io.pins.gpio1.into_open_drain_output();
-    let mut scl_pin = io.pins.gpio2.into_open_drain_output();
-
-    scl_pin.set_high().ok();
-    sda_pin.set_high().ok();
-
-    let mut delay = Delay::new(&clocks);
+    let delay = Delay::new(&clocks);
 
     let mut state = I2cState::Idle;
 
@@ -84,8 +73,17 @@ fn main() -> ! {
     let mut prev_sda = true;
 
     loop {
-        let sda = sda_pin.is_high().unwrap();
-        let scl = scl_pin.is_high().unwrap();
+        let sda = sda_pin.is_high();
+        let scl = scl_pin.is_high();
+
+        // detect RESTART condition
+        if prev_scl && scl && prev_sda && !sda {
+            state = I2cState::Idle;
+
+            rdata_index = 0;
+            read_data.iter_mut().for_each(|m| *m = 0);
+            wdata_index = 0;
+        }
 
         // detect STOP condition
         if prev_scl && scl && !prev_sda && sda {
@@ -131,7 +129,7 @@ fn main() -> ! {
                 addr_bit += 1;
                 if addr_bit == 8 {
                     do_clock_stretch!(CLOCK_STRETCH_DELAY_US, delay, scl_pin, {
-                        sda_pin.set_low().ok(); // ACK
+                        sda_pin.set_low(); // ACK
                     });
                     is_read = addr & 1 == 0;
                     I2cState::AddrAckSclLo
@@ -142,7 +140,7 @@ fn main() -> ! {
             }
             I2cState::AddrAckSclLo if scl => I2cState::AddrAckSclHi,
             I2cState::AddrAckSclHi if !scl => {
-                sda_pin.set_high().ok();
+                sda_pin.set_high();
                 I2cState::DataBitSclLo
             }
 
@@ -157,7 +155,7 @@ fn main() -> ! {
                 data_bit += 1;
                 if data_bit == 8 {
                     do_clock_stretch!(CLOCK_STRETCH_DELAY_US, delay, scl_pin, {
-                        sda_pin.set_low().ok(); // ACK
+                        sda_pin.set_low(); // ACK
                     });
                     data_bit = 0;
                     rdata_index += 1;
@@ -169,7 +167,7 @@ fn main() -> ! {
             }
             I2cState::DataAckSclLo if scl && is_read => I2cState::DataAckSclHi,
             I2cState::DataAckSclHi if !scl && is_read => {
-                sda_pin.set_high().ok();
+                sda_pin.set_high();
                 I2cState::DataBitSclLo
             }
 
@@ -178,9 +176,9 @@ fn main() -> ! {
                 let bit = (wdata[wdata_index] & (1 << (7 - data_bit))) != 0;
                 do_clock_stretch!(CLOCK_STRETCH_DELAY_US, delay, scl_pin, {
                     if bit {
-                        sda_pin.set_high().ok();
+                        sda_pin.set_high();
                     } else {
-                        sda_pin.set_low().ok();
+                        sda_pin.set_low();
                     }
                 });
 
@@ -190,7 +188,7 @@ fn main() -> ! {
             I2cState::DataBitSclHi if !scl && !is_read => {
                 data_bit += 1;
                 if data_bit == 8 {
-                    sda_pin.set_high().ok();
+                    sda_pin.set_high();
                     data_bit = 0;
                     wdata_index += 1;
                     I2cState::DataAckSclLo
